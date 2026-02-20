@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Pairing allowlist management for TinyClaw
+# Pairing allowlist management for tinyAGI
 
 pairing_file_path() {
-    if [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
+    if [ -f "$SCRIPT_DIR/.tinyagi/settings.json" ]; then
+        echo "$SCRIPT_DIR/.tinyagi/pairing.json"
+    elif [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
         echo "$SCRIPT_DIR/.tinyclaw/pairing.json"
+    elif [ -n "$TINYAGI_STATE_HOME" ]; then
+        echo "$TINYAGI_STATE_HOME/pairing.json"
     else
-        echo "$HOME/.tinyclaw/pairing.json"
+        echo "$HOME/.tinyagi/pairing.json"
     fi
 }
 

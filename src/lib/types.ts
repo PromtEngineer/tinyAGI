@@ -1,7 +1,7 @@
 export interface AgentConfig {
     name: string;
     provider: string;       // 'anthropic' or 'openai'
-    model: string;           // e.g. 'sonnet', 'opus', 'gpt-5.3-codex'
+    model: string;           // e.g. 'sonnet', 'opus', 'gpt-5-codex'
     working_directory: string;
 }
 
@@ -25,7 +25,11 @@ export interface Settings {
         enabled?: string[];
         discord?: { bot_token?: string };
         telegram?: { bot_token?: string };
-        whatsapp?: {};
+        whatsapp?: {
+            self_command_only?: boolean;
+            self_command_prefix?: string;
+            require_self_chat?: boolean;
+        };
     };
     models?: {
         provider?: string; // 'anthropic' or 'openai'
@@ -40,6 +44,27 @@ export interface Settings {
     teams?: Record<string, TeamConfig>;
     monitoring?: {
         heartbeat_interval?: number;
+    };
+    harness?: {
+        enabled?: boolean;
+        autonomy?: 'low' | 'normal' | 'strict';
+        quiet_hours?: {
+            start?: string; // HH:MM (24h local)
+            end?: string;   // HH:MM (24h local)
+        };
+        digest_time?: string; // HH:MM (24h local)
+        browser?: {
+            enabled?: boolean;
+            provider?: 'auto' | 'cdp' | 'chrome-devtools-mcp';
+            profile_path?: string;
+            profile_directory?: string;
+            debugger_url?: string;
+            debugger_ports?: number[];
+            mcp_channel?: 'stable' | 'canary' | 'beta' | 'dev';
+            open_domain_access?: boolean;
+            hard_stop_payments?: boolean;
+            use_claude_chrome?: boolean;
+        };
     };
 }
 
@@ -61,6 +86,7 @@ export interface Conversation {
     id: string;
     channel: string;
     sender: string;
+    senderId?: string;
     originalMessage: string;
     messageId: string;
     pending: number;
@@ -77,6 +103,7 @@ export interface Conversation {
 export interface ResponseData {
     channel: string;
     sender: string;
+    senderId?: string;
     message: string;
     originalMessage: string;
     timestamp: number;
@@ -101,5 +128,6 @@ export const CLAUDE_MODEL_IDS: Record<string, string> = {
 
 export const CODEX_MODEL_IDS: Record<string, string> = {
     'gpt-5.2': 'gpt-5.2',
+    'gpt-5-codex': 'gpt-5-codex',
     'gpt-5.3-codex': 'gpt-5.3-codex',
 };

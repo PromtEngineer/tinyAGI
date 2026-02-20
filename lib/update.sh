@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Update management for TinyClaw
+# Update management for tinyAGI
 
 # GitHub repository info
 GITHUB_REPO="jlia0/tinyclaw"
-UPDATE_CHECK_CACHE="$HOME/.tinyclaw/.update_check"
+UPDATE_CHECK_CACHE="$HOME/.tinyagi/.update_check"
 UPDATE_CHECK_TTL=3600  # Check once per hour
 
 # Get current version
@@ -56,7 +56,7 @@ check_for_updates() {
     local force="${1:-false}"
 
     # Skip if disabled
-    if [ "${TINYCLAW_SKIP_UPDATE_CHECK:-}" = "1" ]; then
+    if [ "${TINYAGI_SKIP_UPDATE_CHECK:-${TINYCLAW_SKIP_UPDATE_CHECK:-0}}" = "1" ]; then
         return 1
     fi
 
@@ -111,7 +111,7 @@ show_update_notification() {
     echo -e "  Current: ${RED}v${current_version}${NC}"
     echo -e "  Latest:  ${GREEN}v${latest_version}${NC}"
     echo ""
-    echo -e "  Update:  ${GREEN}tinyclaw update${NC}"
+    echo -e "  Update:  ${GREEN}${CLI_NAME:-tinyagi} update${NC}"
     echo -e "  Changes: ${BLUE}https://github.com/$GITHUB_REPO/releases/v${latest_version}${NC}"
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -120,13 +120,13 @@ show_update_notification() {
 
 # Perform update
 do_update() {
-    echo -e "${BLUE}TinyClaw Update${NC}"
+    echo -e "${BLUE}tinyAGI Update${NC}"
     echo "==============="
     echo ""
 
     # Check if running
     if session_exists; then
-        echo -e "${YELLOW}Warning: TinyClaw is currently running${NC}"
+        echo -e "${YELLOW}Warning: tinyAGI is currently running${NC}"
         echo ""
         read -rp "Stop and update? [y/N]: " CONFIRM
         if [[ ! "$CONFIRM" =~ ^[yY] ]]; then
@@ -191,15 +191,16 @@ do_update() {
 
     # Backup current installation
     echo -e "${BLUE}[2/4] Backing up current installation...${NC}"
-    local backup_dir="$HOME/.tinyclaw/backups/v${current_version}-$(date +%Y%m%d_%H%M%S)"
+    local backup_dir="$HOME/.tinyagi/backups/v${current_version}-$(date +%Y%m%d_%H%M%S)"
     mkdir -p "$backup_dir"
 
-    # Backup key files (not .tinyclaw data)
+    # Backup key files (not state data)
     cp -r "$SCRIPT_DIR/bin" "$backup_dir/" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/src" "$backup_dir/" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/dist" "$backup_dir/" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/lib" "$backup_dir/" 2>/dev/null || true
     cp "$SCRIPT_DIR/tinyclaw.sh" "$backup_dir/" 2>/dev/null || true
+    cp "$SCRIPT_DIR/tinyagi.sh" "$backup_dir/" 2>/dev/null || true
     cp "$SCRIPT_DIR/package.json" "$backup_dir/" 2>/dev/null || true
 
     echo -e "${GREEN}✓ Backed up to: $backup_dir${NC}"
@@ -217,8 +218,9 @@ do_update() {
 
     # Make scripts executable
     find "$SCRIPT_DIR/bin" "$SCRIPT_DIR/lib" "$SCRIPT_DIR/scripts" \
-        -type f \( -name "*.sh" -o -name "tinyclaw" \) -exec chmod +x {} +
+        -type f \( -name "*.sh" -o -name "tinyclaw" -o -name "tinyagi" \) -exec chmod +x {} +
     chmod +x "$SCRIPT_DIR/tinyclaw.sh"
+    chmod +x "$SCRIPT_DIR/tinyagi.sh" 2>/dev/null || true
 
     rm -rf "$temp_dir"
 
@@ -236,7 +238,7 @@ do_update() {
     echo ""
     echo "Backup location: $backup_dir"
     echo ""
-    echo "Start TinyClaw:"
-    echo -e "  ${GREEN}tinyclaw start${NC}"
+    echo "Start tinyAGI:"
+    echo -e "  ${GREEN}${CLI_NAME:-tinyagi} start${NC}"
     echo ""
 }

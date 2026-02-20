@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * WhatsApp Client for TinyClaw Simple
+ * WhatsApp Client for tinyAGI
  * Writes messages to queue and reads responses
  * Does NOT call Claude directly - that's handled by queue-processor
  */
@@ -10,22 +10,39 @@ import qrcode from 'qrcode-terminal';
 import fs from 'fs';
 import path from 'path';
 import { ensureSenderPaired } from '../lib/pairing';
-
-const SCRIPT_DIR = path.resolve(__dirname, '..', '..');
-const _localTinyclaw = path.join(SCRIPT_DIR, '.tinyclaw');
-const TINYCLAW_HOME = fs.existsSync(path.join(_localTinyclaw, 'settings.json'))
-    ? _localTinyclaw
-    : path.join(require('os').homedir(), '.tinyclaw');
-const QUEUE_INCOMING = path.join(TINYCLAW_HOME, 'queue/incoming');
-const QUEUE_OUTGOING = path.join(TINYCLAW_HOME, 'queue/outgoing');
-const LOG_FILE = path.join(TINYCLAW_HOME, 'logs/whatsapp.log');
-const SESSION_DIR = path.join(SCRIPT_DIR, '.tinyclaw/whatsapp-session');
-const SETTINGS_FILE = path.join(TINYCLAW_HOME, 'settings.json');
-const FILES_DIR = path.join(TINYCLAW_HOME, 'files');
-const PAIRING_FILE = path.join(TINYCLAW_HOME, 'pairing.json');
+import {
+    FILES_DIR,
+    QUEUE_INCOMING,
+    QUEUE_OUTGOING,
+    SETTINGS_FILE,
+    TINYAGI_HOME,
+    getHarnessSettings,
+    getSettings,
+    saveSettings,
+} from '../lib/config';
+import {
+    incrementMetric,
+    getPermission,
+    listBrowserApprovals,
+    listPermissions,
+    resolveBrowserApproval,
+    upsertPermission,
+} from '../harness/repository';
+import { renderMemoryForUser } from '../harness/memory/service';
+import {
+    cleanupExpiredPendingMessages,
+    clearPendingMessage,
+    readPendingMessage,
+    rememberPendingMessage,
+} from './pending-store';
+const LOG_FILE = path.join(TINYAGI_HOME, 'logs/whatsapp.log');
+const SESSION_DIR = path.join(TINYAGI_HOME, 'whatsapp-session');
+const PAIRING_FILE = path.join(TINYAGI_HOME, 'pairing.json');
+const CHANNELS_DIR = path.join(TINYAGI_HOME, 'channels');
+const CLI_NAME = 'tinyagi';
 
 // Ensure directories exist
-[QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE), SESSION_DIR, FILES_DIR].forEach(dir => {
+[QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE), SESSION_DIR, FILES_DIR, CHANNELS_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -124,7 +141,7 @@ function getTeamListText(): string {
         const settings = JSON.parse(settingsData);
         const teams = settings.teams;
         if (!teams || Object.keys(teams).length === 0) {
-            return 'No teams configured.\n\nCreate a team with: tinyclaw team add';
+            return `No teams configured.\n\nCreate a team with: ${CLI_NAME} team add`;
         }
         let text = '*Available Teams:*\n';
         for (const [id, team] of Object.entries(teams) as [string, any][]) {
@@ -146,7 +163,7 @@ function getAgentListText(): string {
         const settings = JSON.parse(settingsData);
         const agents = settings.agents;
         if (!agents || Object.keys(agents).length === 0) {
-            return 'No agents configured. Using default single-agent mode.\n\nConfigure agents in .tinyclaw/settings.json or run: tinyclaw agent add';
+            return `No agents configured. Using default single-agent mode.\n\nConfigure agents in ~/.tinyagi/settings.json or run: ${CLI_NAME} agent add`;
         }
         let text = '*Available Agents:*\n';
         for (const [id, agent] of Object.entries(agents) as [string, any][]) {
@@ -167,9 +184,83 @@ function pairingMessage(code: string): string {
     return [
         'This sender is not paired yet.',
         `Your pairing code: ${code}`,
-        'Ask the TinyClaw owner to approve you with:',
-        `tinyclaw pairing approve ${code}`,
+        'Ask the tinyAGI owner to approve you with:',
+        `${CLI_NAME} pairing approve ${code}`,
     ].join('\n');
+}
+
+function getSenderPermissionsText(senderId: string): string {
+    const rows = listPermissions(senderId);
+    if (rows.length === 0) {
+        return 'No permissions granted yet.';
+    }
+
+    const lines = ['Permissions:'];
+    for (const row of rows.slice(0, 30)) {
+        lines.push(`- ${row.subject}:${row.action} status=${row.status} id=${row.permission_id}`);
+    }
+    return lines.join('\n');
+}
+
+function getStatusText(senderId: string): string {
+    const harness = getHarnessSettings();
+    const browserPending = listBrowserApprovals(senderId).filter(r => r.status === 'pending').length;
+    const permissionPending = listPermissions(senderId).filter(r => r.status === 'pending').length;
+
+    return [
+        '*tinyAGI Status*',
+        `Harness: ${harness.enabled ? 'enabled' : 'disabled'}`,
+        `Autonomy: ${harness.autonomy}`,
+        `Quiet hours: ${harness.quiet_hours.start}-${harness.quiet_hours.end}`,
+        `Digest: ${harness.digest_time}`,
+        `Pending approvals: ${browserPending + permissionPending}`,
+    ].join('\n');
+}
+
+function setAutonomyMode(mode: 'low' | 'normal' | 'strict'): void {
+    const settings = getSettings();
+    if (!settings.harness) settings.harness = {};
+    settings.harness.autonomy = mode;
+    saveSettings(settings);
+}
+
+interface WhatsAppCommandPolicy {
+    selfCommandOnly: boolean;
+    selfCommandPrefix: string;
+    requireSelfChat: boolean;
+}
+
+function getWhatsAppCommandPolicy(): WhatsAppCommandPolicy {
+    const settings = getSettings();
+    const raw = settings.channels?.whatsapp || {};
+    const prefix = typeof raw.self_command_prefix === 'string' && raw.self_command_prefix.trim().length > 0
+        ? raw.self_command_prefix.trim()
+        : '/agent';
+
+    return {
+        // Default to strict self-command mode for safety.
+        selfCommandOnly: raw.self_command_only ?? true,
+        selfCommandPrefix: prefix,
+        requireSelfChat: raw.require_self_chat ?? true,
+    };
+}
+
+function escapeRegex(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseAgentCommandPayload(input: string, prefix: string): { matched: boolean; payload: string } {
+    const source = input.trim();
+    const re = new RegExp(`^${escapeRegex(prefix)}(?:\\s+([\\s\\S]*))?$`, 'i');
+    const match = source.match(re);
+    if (!match) {
+        return { matched: false, payload: '' };
+    }
+
+    return {
+        matched: true,
+        payload: (match[1] || '').trim(),
+    };
 }
 
 // Initialize WhatsApp client
@@ -199,15 +290,11 @@ client.on('qr', (qr: string) => {
     // Display in tmux pane
     qrcode.generate(qr, { small: true });
 
-    // Save to file for tinyclaw.sh to display (avoids tmux capture distortion)
-    const channelsDir = path.join(SCRIPT_DIR, '.tinyclaw/channels');
-    if (!fs.existsSync(channelsDir)) {
-        fs.mkdirSync(channelsDir, { recursive: true });
-    }
-    const qrFile = path.join(channelsDir, 'whatsapp_qr.txt');
+    // Save to file for daemon script display (avoids tmux capture distortion)
+    const qrFile = path.join(CHANNELS_DIR, 'whatsapp_qr.txt');
     qrcode.generate(qr, { small: true }, (code: string) => {
         fs.writeFileSync(qrFile, code);
-        log('INFO', 'QR code saved to .tinyclaw/channels/whatsapp_qr.txt');
+        log('INFO', `QR code saved to ${qrFile}`);
     });
 
     console.log('\n');
@@ -224,19 +311,14 @@ client.on('ready', () => {
     log('INFO', '✓ WhatsApp client connected and ready!');
     log('INFO', 'Listening for messages...');
 
-    // Create ready flag for tinyclaw.sh
-    const readyFile = path.join(SCRIPT_DIR, '.tinyclaw/channels/whatsapp_ready');
+    // Create ready flag for daemon script
+    const readyFile = path.join(CHANNELS_DIR, 'whatsapp_ready');
     fs.writeFileSync(readyFile, Date.now().toString());
 });
 
 // Message received - Write to queue
 client.on('message_create', async (message: Message) => {
     try {
-        // Skip outgoing messages
-        if (message.fromMe) {
-            return;
-        }
-
         // Check if message has downloadable media
         const hasMedia = message.hasMedia && MEDIA_TYPES.includes(message.type);
         const isChat = message.type === 'chat';
@@ -251,7 +333,11 @@ client.on('message_create', async (message: Message) => {
 
         const chat = await message.getChat();
         const contact = await message.getContact();
-        const sender = contact.pushname || contact.name || message.from;
+        const policy = getWhatsAppCommandPolicy();
+        const ownId = ((client.info as any)?.wid?._serialized || '') as string;
+        const chatId = ((chat as any)?.id?._serialized || message.from || message.to || '') as string;
+        const senderId = message.fromMe ? (ownId || message.from || message.to || '') : message.from;
+        const sender = contact.pushname || contact.name || senderId || message.from;
 
         // Skip group messages
         if (chat.isGroup) {
@@ -278,65 +364,190 @@ client.on('message_create', async (message: Message) => {
             return;
         }
 
-        log('INFO', `📱 Message from ${sender}: ${messageText.substring(0, 50)}${downloadedFiles.length > 0 ? ` [+${downloadedFiles.length} file(s)]` : ''}...`);
+        let forceRouteToAgent = false;
+        if (policy.selfCommandOnly) {
+            const trimmed = messageText.trim();
+            const parsedCommand = parseAgentCommandPayload(trimmed, policy.selfCommandPrefix);
+            const isSelfChat = !!ownId && chatId === ownId;
 
-        const pairing = ensureSenderPaired(PAIRING_FILE, 'whatsapp', message.from, sender);
-        if (!pairing.approved && pairing.code) {
-            if (pairing.isNewPending) {
-                log('INFO', `Blocked unpaired WhatsApp sender ${sender} (${message.from}) with code ${pairing.code}`);
-                await message.reply(pairingMessage(pairing.code));
-            } else {
-                log('INFO', `Blocked pending WhatsApp sender ${sender} (${message.from}) without re-sending pairing message`);
+            if (!message.fromMe) {
+                log('DEBUG', `Ignoring external WhatsApp message from ${senderId}; self_command_only is enabled.`);
+                return;
             }
-            return;
+            if (policy.requireSelfChat && !isSelfChat) {
+                log('DEBUG', `Ignoring self-sent WhatsApp message outside self chat (${chatId}).`);
+                return;
+            }
+            if (!parsedCommand.matched) {
+                log('DEBUG', `Ignoring self-sent WhatsApp message without prefix '${policy.selfCommandPrefix}'.`);
+                return;
+            }
+
+            messageText = parsedCommand.payload;
+            if (!messageText && downloadedFiles.length === 0) {
+                await message.reply(`Usage: ${policy.selfCommandPrefix} <task>`);
+                return;
+            }
+            forceRouteToAgent = true;
+            log('INFO', `Accepted self command from ${sender}: ${messageText.substring(0, 50)}${downloadedFiles.length > 0 ? ` [+${downloadedFiles.length} file(s)]` : ''}...`);
+        } else {
+            if (message.fromMe) {
+                return;
+            }
+            log('INFO', `📱 Message from ${sender}: ${messageText.substring(0, 50)}${downloadedFiles.length > 0 ? ` [+${downloadedFiles.length} file(s)]` : ''}...`);
         }
 
-        // Check for agent list command
-        if (message.body.trim().match(/^[!/]agent$/i)) {
-            log('INFO', 'Agent list command received');
-            const agentList = getAgentListText();
-            await message.reply(agentList);
-            return;
-        }
-
-        // Check for team list command
-        if (message.body.trim().match(/^[!/]team$/i)) {
-            log('INFO', 'Team list command received');
-            const teamList = getTeamListText();
-            await message.reply(teamList);
-            return;
-        }
-
-        // Check for reset command: /reset @agent_id [@agent_id2 ...]
-        const resetMatch = messageText.trim().match(/^[!/]reset\s+(.+)$/i);
-        if (messageText.trim().match(/^[!/]reset$/i)) {
-            await message.reply('Usage: /reset @agent_id [@agent_id2 ...]\nSpecify which agent(s) to reset.');
-            return;
-        }
-        if (resetMatch) {
-            log('INFO', 'Per-agent reset command received');
-            const agentArgs = resetMatch[1].split(/\s+/).map(a => a.replace(/^@/, '').toLowerCase());
-            try {
-                const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
-                const settings = JSON.parse(settingsData);
-                const agents = settings.agents || {};
-                const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyclaw-workspace');
-                const resetResults: string[] = [];
-                for (const agentId of agentArgs) {
-                    if (!agents[agentId]) {
-                        resetResults.push(`Agent '${agentId}' not found.`);
-                        continue;
-                    }
-                    const flagDir = path.join(workspacePath, agentId);
-                    if (!fs.existsSync(flagDir)) fs.mkdirSync(flagDir, { recursive: true });
-                    fs.writeFileSync(path.join(flagDir, 'reset_flag'), 'reset');
-                    resetResults.push(`Reset @${agentId} (${agents[agentId].name}).`);
+        if (!forceRouteToAgent) {
+            const pairing = ensureSenderPaired(PAIRING_FILE, 'whatsapp', senderId, sender);
+            if (!pairing.approved && pairing.code) {
+                if (pairing.isNewPending) {
+                    log('INFO', `Blocked unpaired WhatsApp sender ${sender} (${senderId}) with code ${pairing.code}`);
+                    await message.reply(pairingMessage(pairing.code));
+                } else {
+                    log('INFO', `Blocked pending WhatsApp sender ${sender} (${senderId}) without re-sending pairing message`);
                 }
-                await message.reply(resetResults.join('\n'));
-            } catch {
-                await message.reply('Could not process reset command. Check settings.');
+                return;
             }
-            return;
+        }
+
+        if (!forceRouteToAgent) {
+            // Harness/ops command: /status
+            if (messageText.trim().match(/^[!/]status$/i)) {
+                await message.reply(getStatusText(senderId));
+                return;
+            }
+
+            // Harness/ops command: /approve <request_id>
+            const approveMatch = messageText.trim().match(/^[!/]approve\s+(\S+)$/i);
+            if (approveMatch) {
+                const requestId = approveMatch[1].trim();
+                const browserResolved = resolveBrowserApproval(requestId, true, 'approved_from_whatsapp');
+                if (browserResolved) {
+                    await message.reply(`Approved request ${requestId}.`);
+                    return;
+                }
+
+                const permission = getPermission(requestId);
+                if (permission && permission.user_id === senderId && permission.status === 'pending') {
+                    upsertPermission(
+                        permission.permission_id,
+                        permission.user_id,
+                        permission.subject,
+                        permission.action,
+                        permission.resource || 'tool',
+                        'active'
+                    );
+                    await message.reply(`Permission approved: ${permission.subject}:${permission.action}`);
+                    return;
+                }
+
+                await message.reply(`Request not found: ${requestId}`);
+                return;
+            }
+
+            // Harness/ops command: /deny <request_id>
+            const denyMatch = messageText.trim().match(/^[!/]deny\s+(\S+)$/i);
+            if (denyMatch) {
+                const requestId = denyMatch[1].trim();
+                const browserResolved = resolveBrowserApproval(requestId, false, 'denied_from_whatsapp');
+                if (browserResolved) {
+                    await message.reply(`Denied request ${requestId}.`);
+                    return;
+                }
+
+                const permission = getPermission(requestId);
+                if (permission && permission.user_id === senderId && permission.status === 'pending') {
+                    upsertPermission(
+                        permission.permission_id,
+                        permission.user_id,
+                        permission.subject,
+                        permission.action,
+                        permission.resource || 'tool',
+                        'revoked'
+                    );
+                    await message.reply(`Permission denied: ${permission.subject}:${permission.action}`);
+                    return;
+                }
+
+                await message.reply(`Request not found: ${requestId}`);
+                return;
+            }
+
+            // Harness/ops command: /permissions
+            if (messageText.trim().match(/^[!/]permissions$/i)) {
+                await message.reply(getSenderPermissionsText(senderId));
+                return;
+            }
+
+            // Harness/ops command: /memory [topic]
+            const memoryMatch = messageText.trim().match(/^[!/]memory(?:\s+(.+))?$/i);
+            if (memoryMatch) {
+                const topic = memoryMatch[1] ? memoryMatch[1].trim() : '';
+                await message.reply(renderMemoryForUser(senderId, topic));
+                return;
+            }
+
+            // Harness/ops command: /autonomy [low|normal|strict]
+            const autonomyMatch = messageText.trim().match(/^[!/]autonomy(?:\s+(low|normal|strict))?$/i);
+            if (autonomyMatch) {
+                const mode = autonomyMatch[1];
+                if (!mode) {
+                    const current = getHarnessSettings();
+                    await message.reply(`Current autonomy mode: ${current.autonomy}`);
+                } else {
+                    setAutonomyMode(mode as 'low' | 'normal' | 'strict');
+                    await message.reply(`Autonomy mode set to ${mode}.`);
+                }
+                return;
+            }
+
+            // Check for agent list command
+            if (message.body.trim().match(/^[!/]agent$/i)) {
+                log('INFO', 'Agent list command received');
+                const agentList = getAgentListText();
+                await message.reply(agentList);
+                return;
+            }
+
+            // Check for team list command
+            if (message.body.trim().match(/^[!/]team$/i)) {
+                log('INFO', 'Team list command received');
+                const teamList = getTeamListText();
+                await message.reply(teamList);
+                return;
+            }
+
+            // Check for reset command: /reset @agent_id [@agent_id2 ...]
+            const resetMatch = messageText.trim().match(/^[!/]reset\s+(.+)$/i);
+            if (messageText.trim().match(/^[!/]reset$/i)) {
+                await message.reply('Usage: /reset @agent_id [@agent_id2 ...]\nSpecify which agent(s) to reset.');
+                return;
+            }
+            if (resetMatch) {
+                log('INFO', 'Per-agent reset command received');
+                const agentArgs = resetMatch[1].split(/\s+/).map(a => a.replace(/^@/, '').toLowerCase());
+                try {
+                    const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
+                    const settings = JSON.parse(settingsData);
+                    const agents = settings.agents || {};
+                    const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyagi-workspace');
+                    const resetResults: string[] = [];
+                    for (const agentId of agentArgs) {
+                        if (!agents[agentId]) {
+                            resetResults.push(`Agent '${agentId}' not found.`);
+                            continue;
+                        }
+                        const flagDir = path.join(workspacePath, agentId);
+                        if (!fs.existsSync(flagDir)) fs.mkdirSync(flagDir, { recursive: true });
+                        fs.writeFileSync(path.join(flagDir, 'reset_flag'), 'reset');
+                        resetResults.push(`Reset @${agentId} (${agents[agentId].name}).`);
+                    }
+                    await message.reply(resetResults.join('\n'));
+                } catch {
+                    await message.reply('Could not process reset command. Check settings.');
+                }
+                return;
+            }
         }
 
         // Show typing indicator
@@ -353,7 +564,7 @@ client.on('message_create', async (message: Message) => {
         const queueData: QueueData = {
             channel: 'whatsapp',
             sender: sender,
-            senderId: message.from,
+            senderId,
             message: fullMessage,
             timestamp: Date.now(),
             messageId: messageId,
@@ -371,14 +582,24 @@ client.on('message_create', async (message: Message) => {
             chat: chat,
             timestamp: Date.now()
         });
+        rememberPendingMessage({
+            messageId,
+            channel: 'whatsapp',
+            sender,
+            senderId,
+            chatRef: senderId,
+            replyRef: (message.id && (message.id as any)._serialized) ? String((message.id as any)._serialized) : '',
+        });
 
         // Clean up old pending messages (older than 10 minutes)
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         for (const [id, data] of pendingMessages.entries()) {
             if (data.timestamp < tenMinutesAgo) {
                 pendingMessages.delete(id);
+                clearPendingMessage(id);
             }
         }
+        cleanupExpiredPendingMessages('whatsapp');
 
     } catch (error) {
         log('ERROR', `Message handling error: ${(error as Error).message}`);
@@ -406,6 +627,7 @@ async function checkOutgoingQueue(): Promise<void> {
 
                 // Find pending message
                 const pending = pendingMessages.get(messageId);
+                const durablePending = pending ? null : readPendingMessage('whatsapp', messageId);
                 if (pending) {
                     // Send any attached files first
                     if (responseData.files && responseData.files.length > 0) {
@@ -429,6 +651,33 @@ async function checkOutgoingQueue(): Promise<void> {
 
                     // Clean up
                     pendingMessages.delete(messageId);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'whatsapp', mode: 'reply' });
+                    fs.unlinkSync(filePath);
+                } else if (durablePending) {
+                    const chatId = durablePending.chatRef.includes('@') ? durablePending.chatRef : `${durablePending.chatRef}@c.us`;
+                    const durableChat = await client.getChatById(chatId);
+
+                    if (responseData.files && responseData.files.length > 0) {
+                        for (const file of responseData.files) {
+                            try {
+                                if (!fs.existsSync(file)) continue;
+                                const media = MessageMedia.fromFilePath(file);
+                                await durableChat.sendMessage(media);
+                                log('INFO', `Sent file to WhatsApp: ${path.basename(file)}`);
+                            } catch (fileErr) {
+                                log('ERROR', `Failed to send file ${file}: ${(fileErr as Error).message}`);
+                            }
+                        }
+                    }
+
+                    if (responseText) {
+                        await durableChat.sendMessage(responseText);
+                    }
+
+                    log('INFO', `✓ Sent durable response to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'whatsapp', mode: 'durable' });
                     fs.unlinkSync(filePath);
                 } else if (responseData.senderId) {
                     // Proactive/agent-initiated message — send directly to user
@@ -456,12 +705,14 @@ async function checkOutgoingQueue(): Promise<void> {
                         }
 
                         log('INFO', `Sent proactive message to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                        incrementMetric('channel_response_delivered_count', 1, { channel: 'whatsapp', mode: 'proactive' });
                     } catch (chatErr) {
                         log('ERROR', `Failed to send proactive message to ${responseData.senderId}: ${(chatErr as Error).message}`);
                     }
                     fs.unlinkSync(filePath);
                 } else {
                     log('WARN', `No pending message for ${messageId} and no senderId, cleaning up`);
+                    incrementMetric('channel_response_dropped_count', 1, { channel: 'whatsapp', reason: 'no_pending_no_sender' });
                     fs.unlinkSync(filePath);
                 }
             } catch (error) {
@@ -489,7 +740,7 @@ client.on('disconnected', (reason: string) => {
     log('WARN', `WhatsApp disconnected: ${reason}`);
 
     // Remove ready flag
-    const readyFile = path.join(SCRIPT_DIR, '.tinyclaw/channels/whatsapp_ready');
+    const readyFile = path.join(CHANNELS_DIR, 'whatsapp_ready');
     if (fs.existsSync(readyFile)) {
         fs.unlinkSync(readyFile);
     }
@@ -500,7 +751,7 @@ process.on('SIGINT', async () => {
     log('INFO', 'Shutting down WhatsApp client...');
 
     // Remove ready flag
-    const readyFile = path.join(SCRIPT_DIR, '.tinyclaw/channels/whatsapp_ready');
+    const readyFile = path.join(CHANNELS_DIR, 'whatsapp_ready');
     if (fs.existsSync(readyFile)) {
         fs.unlinkSync(readyFile);
     }
@@ -513,7 +764,7 @@ process.on('SIGTERM', async () => {
     log('INFO', 'Shutting down WhatsApp client...');
 
     // Remove ready flag
-    const readyFile = path.join(SCRIPT_DIR, '.tinyclaw/channels/whatsapp_ready');
+    const readyFile = path.join(CHANNELS_DIR, 'whatsapp_ready');
     if (fs.existsSync(readyFile)) {
         fs.unlinkSync(readyFile);
     }

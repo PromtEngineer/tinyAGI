@@ -1,0 +1,23 @@
+#!/bin/bash
+# tinyAGI CLI Wrapper
+# Allows tinyagi to be run from any directory.
+
+TINYAGI_BIN="$0"
+
+while [ -L "$TINYAGI_BIN" ]; do
+    TINYAGI_DIR="$(cd "$(dirname "$TINYAGI_BIN")" && pwd)"
+    TINYAGI_BIN="$(readlink "$TINYAGI_BIN")"
+    [[ "$TINYAGI_BIN" != /* ]] && TINYAGI_BIN="$TINYAGI_DIR/$TINYAGI_BIN"
+done
+
+TINYAGI_DIR="$(cd "$(dirname "$TINYAGI_BIN")" && pwd)"
+export TINYAGI_HOME="$(dirname "$TINYAGI_DIR")"
+
+BASH_BIN="$(command -v bash)"
+if [ -x "/opt/homebrew/bin/bash" ]; then
+    BASH_BIN="/opt/homebrew/bin/bash"
+elif [ -x "/usr/local/bin/bash" ]; then
+    BASH_BIN="/usr/local/bin/bash"
+fi
+
+exec "$BASH_BIN" "$TINYAGI_HOME/tinyagi.sh" "$@"

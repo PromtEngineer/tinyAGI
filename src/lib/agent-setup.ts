@@ -79,12 +79,24 @@ export function ensureAgentDirectory(agentDir: string): void {
         fs.symlinkSync(sourceSkills, targetAgentSkills);
     }
 
-    // Create .tinyclaw directory and copy SOUL.md
-    const targetTinyclaw = path.join(agentDir, '.tinyclaw');
-    fs.mkdirSync(targetTinyclaw, { recursive: true });
+    // Create .tinyagi directory and keep .tinyclaw compatibility symlink.
+    const targetTinyagi = path.join(agentDir, '.tinyagi');
+    fs.mkdirSync(targetTinyagi, { recursive: true });
     const sourceSoul = path.join(SCRIPT_DIR, 'SOUL.md');
     if (fs.existsSync(sourceSoul)) {
-        fs.copyFileSync(sourceSoul, path.join(targetTinyclaw, 'SOUL.md'));
+        fs.copyFileSync(sourceSoul, path.join(targetTinyagi, 'SOUL.md'));
+    }
+
+    const targetTinyclaw = path.join(agentDir, '.tinyclaw');
+    if (!fs.existsSync(targetTinyclaw)) {
+        try {
+            fs.symlinkSync(targetTinyagi, targetTinyclaw);
+        } catch {
+            fs.mkdirSync(targetTinyclaw, { recursive: true });
+            if (fs.existsSync(sourceSoul)) {
+                fs.copyFileSync(sourceSoul, path.join(targetTinyclaw, 'SOUL.md'));
+            }
+        }
     }
 }
 

@@ -152,12 +152,12 @@ agent_add() {
         esac
     else
         echo "Model:"
-        echo "  1) GPT-5.3 Codex"
+        echo "  1) GPT-5 Codex"
         echo "  2) GPT-5.2"
         read -rp "Choose [1-2, default: 1]: " AGENT_MODEL_CHOICE
         case "$AGENT_MODEL_CHOICE" in
             2) AGENT_MODEL="gpt-5.2" ;;
-            *) AGENT_MODEL="gpt-5.3-codex" ;;
+            *) AGENT_MODEL="gpt-5-codex" ;;
         esac
     fi
 
@@ -187,10 +187,14 @@ agent_add() {
         "$SETTINGS_FILE" > "$tmp_file" && mv "$tmp_file" "$SETTINGS_FILE"
 
     # Create agent directory and copy configuration files
-    if [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
-        TINYCLAW_HOME="$SCRIPT_DIR/.tinyclaw"
+    if [ -f "$SCRIPT_DIR/.tinyagi/settings.json" ]; then
+        TINYAGI_HOME="$SCRIPT_DIR/.tinyagi"
+    elif [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
+        TINYAGI_HOME="$SCRIPT_DIR/.tinyclaw"
+    elif [ -n "$TINYAGI_STATE_HOME" ]; then
+        TINYAGI_HOME="$TINYAGI_STATE_HOME"
     else
-        TINYCLAW_HOME="$HOME/.tinyclaw"
+        TINYAGI_HOME="$HOME/.tinyagi"
     fi
     mkdir -p "$AGENTS_DIR/$AGENT_ID"
 
@@ -223,7 +227,7 @@ agent_add() {
     # Resolve skills source directory
     local skills_src="$SCRIPT_DIR/.agents/skills"
     if [ ! -d "$skills_src" ]; then
-        skills_src="$TINYCLAW_HOME/.agents/skills"
+        skills_src="$TINYAGI_HOME/.agents/skills"
     fi
 
     if [ -d "$skills_src" ]; then
@@ -241,11 +245,14 @@ agent_add() {
         fi
     fi
 
-    # Create .tinyclaw directory and copy SOUL.md
-    mkdir -p "$AGENTS_DIR/$AGENT_ID/.tinyclaw"
+    # Create .tinyagi directory (plus .tinyclaw compatibility symlink) and copy SOUL.md
+    mkdir -p "$AGENTS_DIR/$AGENT_ID/.tinyagi"
     if [ -f "$SCRIPT_DIR/SOUL.md" ]; then
-        cp "$SCRIPT_DIR/SOUL.md" "$AGENTS_DIR/$AGENT_ID/.tinyclaw/SOUL.md"
-        echo "  → Copied SOUL.md to .tinyclaw/"
+        cp "$SCRIPT_DIR/SOUL.md" "$AGENTS_DIR/$AGENT_ID/.tinyagi/SOUL.md"
+        echo "  → Copied SOUL.md to .tinyagi/"
+    fi
+    if [ ! -e "$AGENTS_DIR/$AGENT_ID/.tinyclaw" ]; then
+        ln -s "$AGENTS_DIR/$AGENT_ID/.tinyagi" "$AGENTS_DIR/$AGENT_ID/.tinyclaw" 2>/dev/null || true
     fi
 
     echo ""

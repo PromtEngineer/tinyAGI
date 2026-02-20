@@ -18,6 +18,17 @@ TINYCLAW_DIR="$(cd "$(dirname "$TINYCLAW_BIN")" && pwd)"
 
 # The actual installation is one directory up from bin/
 export TINYCLAW_HOME="$(dirname "$TINYCLAW_DIR")"
+export TINYAGI_HOME="$TINYCLAW_HOME"
 
-# Execute the main script with all arguments
-exec "$TINYCLAW_HOME/tinyclaw.sh" "$@"
+BASH_BIN="$(command -v bash)"
+if [ -x "/opt/homebrew/bin/bash" ]; then
+    BASH_BIN="/opt/homebrew/bin/bash"
+elif [ -x "/usr/local/bin/bash" ]; then
+    BASH_BIN="/usr/local/bin/bash"
+fi
+
+# Execute the main script with all arguments (compatibility alias)
+if [ -f "$TINYCLAW_HOME/tinyagi.sh" ]; then
+    exec "$BASH_BIN" "$TINYCLAW_HOME/tinyagi.sh" "$@"
+fi
+exec "$BASH_BIN" "$TINYCLAW_HOME/tinyclaw.sh" "$@"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Messaging and logging functions for TinyClaw
+# Messaging and logging functions for tinyAGI
 
 # Send message to Claude and get response
 send_message() {
@@ -58,14 +58,14 @@ channels_reset() {
 
     # WhatsApp has local session files to clear
     if [ "$ch" = "whatsapp" ]; then
-        rm -rf "$SCRIPT_DIR/.tinyclaw/whatsapp-session"
-        rm -f "$SCRIPT_DIR/.tinyclaw/channels/whatsapp_ready"
-        rm -f "$SCRIPT_DIR/.tinyclaw/channels/whatsapp_qr.txt"
+        rm -rf "$TINYAGI_STATE_HOME/whatsapp-session"
+        rm -f "$TINYAGI_STATE_HOME/channels/whatsapp_ready"
+        rm -f "$TINYAGI_STATE_HOME/channels/whatsapp_qr.txt"
         rm -rf "$SCRIPT_DIR/.wwebjs_cache"
         echo -e "${GREEN}✓ WhatsApp session cleared${NC}"
         echo ""
-        echo "Restart TinyClaw to re-authenticate:"
-        echo -e "  ${GREEN}tinyclaw restart${NC}"
+        echo "Restart tinyAGI to re-authenticate:"
+        echo -e "  ${GREEN}${CLI_NAME} restart${NC}"
         return
     fi
 
@@ -74,8 +74,8 @@ channels_reset() {
     if [ -n "$token_key" ]; then
         echo ""
         echo "To reset ${display}, run the setup wizard to update your bot token:"
-        echo -e "  ${GREEN}tinyclaw setup${NC}"
+        echo -e "  ${GREEN}${CLI_NAME} setup${NC}"
         echo ""
-        echo "Or manually edit .tinyclaw/settings.json to change ${token_key}"
+        echo "Or manually edit ~/.tinyagi/settings.json to change ${token_key}"
     fi
 }

@@ -20,11 +20,14 @@ import { MessageData, ResponseData, QueueFile, ChainStep, Conversation, TeamConf
 import {
     QUEUE_INCOMING, QUEUE_OUTGOING, QUEUE_PROCESSING,
     LOG_FILE, EVENTS_DIR, CHATS_DIR, FILES_DIR,
-    getSettings, getAgents, getTeams
+    getSettings, getAgents, getTeams, getHarnessSettings
 } from './lib/config';
 import { log, emitEvent } from './lib/logging';
 import { parseAgentRouting, findTeamForAgent, getAgentResetFlag, extractTeammateMentions } from './lib/routing';
 import { invokeAgent } from './lib/invoke';
+import { executeHarness } from './harness/runtime/orchestrator';
+import { runProactiveSchedulerTick, queueProactiveMessage } from './harness/runtime/proactive-notifier';
+import { appendTaskEvent, supersedeNeedsInputRuns } from './harness/repository';
 
 // Ensure directories exist
 [QUEUE_INCOMING, QUEUE_OUTGOING, QUEUE_PROCESSING, FILES_DIR, path.dirname(LOG_FILE)].forEach(dir => {
@@ -117,6 +120,61 @@ function collectFiles(response: string, fileSet: Set<string>): void {
     }
 }
 
+type MessageIntent = 'question' | 'browser_task' | 'engineering_task' | 'general_task';
+
+const QUESTION_STARTERS = /^(who|what|where|when|why|how|is|are|do|does|can|will|could|would|should|shall)\b/i;
+const BROWSER_KEYWORDS = /\b(browse|browser|website|open\s+.{0,20}url|test\s+.{0,20}UI|chrome|webpage|visit\s+.{0,20}site|screenshot)\b/i;
+const ENGINEERING_KEYWORDS = /\b(build|implement|fix|create|deploy|refactor|code|push|commit|write|develop|debug|compile|install|update\s+.{0,10}(code|package|dependency)|migrate|patch)\b/i;
+
+function classifyMessageIntent(message: string): MessageIntent {
+    const trimmed = message.trim();
+    if (trimmed.endsWith('?') || QUESTION_STARTERS.test(trimmed)) return 'question';
+    if (BROWSER_KEYWORDS.test(trimmed)) return 'browser_task';
+    if (ENGINEERING_KEYWORDS.test(trimmed)) return 'engineering_task';
+    return 'general_task';
+}
+
+const ACK_TEMPLATES: Record<MessageIntent, string | null> = {
+    question: null, // Questions get fast answers; no ack needed
+    browser_task: "On it — opening the browser to work on this. I'll report back with what I find.",
+    engineering_task: "Got it — working on this now. I'll let you know once it's done.",
+    general_task: "Acknowledged — working on this now.",
+};
+
+/**
+ * Classify an incoming message and send an immediate acknowledgment
+ * via the proactive message queue. Returns the classified intent.
+ * Skips ack for heartbeat messages, internal team messages, and questions.
+ */
+function classifyAndAcknowledge(messageData: MessageData, channel: string, isInternal: boolean): MessageIntent {
+    const intent = classifyMessageIntent(messageData.message);
+
+    // Skip ack for heartbeats, internal team messages, and questions
+    if (channel === 'heartbeat' || isInternal || !ACK_TEMPLATES[intent]) {
+        return intent;
+    }
+
+    // Need senderId to route the proactive message back
+    if (!messageData.senderId) return intent;
+
+    const ackText = ACK_TEMPLATES[intent]!;
+
+    queueProactiveMessage({
+        channel,
+        sender: messageData.sender,
+        senderId: messageData.senderId,
+        text: ackText,
+        urgent: true, // bypass quiet hours — the user just messaged us
+    });
+
+    log('INFO', `Ack sent [${intent}] to ${messageData.sender} on ${channel}`);
+    emitEvent('ack_sent', { channel, sender: messageData.sender, intent });
+
+    return intent;
+}
+
+const COMPLETION_INDICATORS = /^(done|finished|completed|here|i('ve| have)|sure|ok|okay|the |your |i |this )/i;
+
 /**
  * Complete a conversation: aggregate responses, write to outgoing queue, save chat history.
  */
@@ -199,6 +257,7 @@ function completeConversation(conv: Conversation): void {
     const responseData: ResponseData = {
         channel: conv.channel,
         sender: conv.sender,
+        senderId: conv.senderId,
         message: responseMessage,
         originalMessage: conv.originalMessage,
         timestamp: Date.now(),
@@ -243,7 +302,7 @@ async function processMessage(messageFile: string): Promise<void> {
         const teams = getTeams(settings);
 
         // Get workspace path from settings
-        const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyclaw-workspace');
+        const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyagi-workspace');
 
         // Route message to agent (or team)
         let agentId: string;
@@ -270,6 +329,7 @@ async function processMessage(messageFile: string): Promise<void> {
             const responseData: ResponseData = {
                 channel,
                 sender,
+                senderId: messageData.senderId,
                 message: message,
                 originalMessage: rawMessage,
                 timestamp: Date.now(),
@@ -327,6 +387,20 @@ async function processMessage(messageFile: string): Promise<void> {
             fs.unlinkSync(agentResetFlag);
         }
 
+        const harnessSettings = getHarnessSettings(settings);
+        if (!isInternal && harnessSettings.enabled && channel !== 'heartbeat' && messageData.senderId) {
+            const supersededRuns = supersedeNeedsInputRuns(channel, messageData.senderId, Date.now());
+            if (supersededRuns.length > 0) {
+                for (const runId of supersededRuns) {
+                    appendTaskEvent(runId, 'superseded_by_new_message', {
+                        messageId,
+                        channel,
+                    });
+                }
+                log('INFO', `Superseded ${supersededRuns.length} blocked run(s) for ${messageData.senderId}`);
+            }
+        }
+
         // For internal messages: append pending response indicator so the agent
         // knows other teammates are still processing and won't re-mention them.
         if (isInternal && messageData.conversationId) {
@@ -340,11 +414,37 @@ async function processMessage(messageFile: string): Promise<void> {
             }
         }
 
+        // Classify and acknowledge (immediate feedback to user)
+        const messageIntent = classifyAndAcknowledge(messageData, channel, isInternal);
+
         // Invoke agent
         emitEvent('chain_step_start', { agentId, agentName: agent.name, fromAgent: messageData.fromAgent || null });
         let response: string;
         try {
-            response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams);
+            const harnessEligible = harnessSettings.enabled && channel !== 'heartbeat';
+
+            if (harnessEligible) {
+                const harnessResult = await executeHarness({
+                    messageData: {
+                        ...messageData,
+                        message,
+                    },
+                    agentId,
+                    agent,
+                    workspacePath,
+                    shouldReset,
+                    agents,
+                    teams,
+                });
+                response = harnessResult.responseText;
+                emitEvent('harness_run', {
+                    runId: harnessResult.runId,
+                    status: harnessResult.status,
+                    verifierOutcome: harnessResult.verifierOutcome || null,
+                });
+            } else {
+                response = await invokeAgent(agent, agentId, message, workspacePath, shouldReset, agents, teams);
+            }
         } catch (error) {
             const provider = agent.provider || 'anthropic';
             log('ERROR', `${provider === 'openai' ? 'Codex' : 'Claude'} error (agent: ${agentId}): ${(error as Error).message}`);
@@ -356,6 +456,11 @@ async function processMessage(messageFile: string): Promise<void> {
         // --- No team context: simple response to user ---
         if (!teamContext) {
             let finalResponse = response.trim();
+
+            // Add completion prefix for task-type messages if response doesn't already sound complete
+            if (messageIntent !== 'question' && finalResponse && !COMPLETION_INDICATORS.test(finalResponse)) {
+                finalResponse = `Done! Here's what happened:\n\n${finalResponse}`;
+            }
 
             // Detect files
             const outboundFilesSet = new Set<string>();
@@ -371,6 +476,7 @@ async function processMessage(messageFile: string): Promise<void> {
             const responseData: ResponseData = {
                 channel,
                 sender,
+                senderId: messageData.senderId,
                 message: responseMessage,
                 originalMessage: rawMessage,
                 timestamp: Date.now(),
@@ -405,6 +511,7 @@ async function processMessage(messageFile: string): Promise<void> {
                 id: convId,
                 channel,
                 sender,
+                senderId: messageData.senderId,
                 originalMessage: rawMessage,
                 messageId,
                 pending: 1, // this initial message
@@ -474,6 +581,7 @@ async function processMessage(messageFile: string): Promise<void> {
 
 // Per-agent processing chains - ensures messages to same agent are sequential
 const agentProcessingChains = new Map<string, Promise<void>>();
+let proactiveTickRunning = false;
 
 /**
  * Peek at a message file to determine which agent it's routed to.
@@ -553,6 +661,27 @@ async function processQueue(): Promise<void> {
     }
 }
 
+function runProactiveTick(): void {
+    if (proactiveTickRunning) return;
+    proactiveTickRunning = true;
+
+    try {
+        const settings = getSettings();
+        const harness = getHarnessSettings(settings);
+        if (!harness.enabled) return;
+
+        const result = runProactiveSchedulerTick();
+        if (result.sent > 0 || result.deferred > 0 || result.flushed > 0) {
+            log('INFO', `Proactive scheduler tick: sent=${result.sent} deferred=${result.deferred} flushed=${result.flushed}`);
+            emitEvent('proactive_tick', result as unknown as Record<string, unknown>);
+        }
+    } catch (error) {
+        log('ERROR', `Proactive scheduler error: ${(error as Error).message}`);
+    } finally {
+        proactiveTickRunning = false;
+    }
+}
+
 // Log agent and team configuration on startup
 function logAgentConfig(): void {
     const settings = getSettings();
@@ -588,6 +717,8 @@ emitEvent('processor_start', { agents: Object.keys(getAgents(getSettings())), te
 
 // Process queue every 1 second
 setInterval(processQueue, 1000);
+// Run proactive digest/outreach scheduler every 60 seconds.
+setInterval(runProactiveTick, 60 * 1000);
 
 // Graceful shutdown
 process.on('SIGINT', () => {

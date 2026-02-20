@@ -6,6 +6,9 @@ export function log(level: string, message: string): void {
     const timestamp = new Date().toISOString();
     const logMessage = `[${timestamp}] [${level}] ${message}\n`;
     console.log(logMessage.trim());
+    if (!fs.existsSync(path.dirname(LOG_FILE))) {
+        fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    }
     fs.appendFileSync(LOG_FILE, logMessage);
 }
 

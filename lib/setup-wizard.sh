@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# TinyClaw Setup Wizard
+# tinyAGI Setup Wizard
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SETTINGS_FILE="$HOME/.tinyclaw/settings.json"
+SETTINGS_FILE="$HOME/.tinyagi/settings.json"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -13,7 +13,7 @@ NC='\033[0m'
 
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  TinyClaw - Setup Wizard${NC}"
+echo -e "${GREEN}  tinyAGI - Setup Wizard${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
@@ -120,13 +120,13 @@ else
     # OpenAI models
     echo "Which OpenAI model?"
     echo ""
-    echo "  1) GPT-5.3 Codex  (recommended)"
+    echo "  1) GPT-5 Codex    (recommended)"
     echo "  2) GPT-5.2"
     echo ""
     read -rp "Choose [1-2]: " MODEL_CHOICE
 
     case "$MODEL_CHOICE" in
-        1) MODEL="gpt-5.3-codex" ;;
+        1) MODEL="gpt-5-codex" ;;
         2) MODEL="gpt-5.2" ;;
         *)
             echo -e "${RED}Invalid choice${NC}"
@@ -155,8 +155,8 @@ echo ""
 echo "Workspace name (where agent directories will be stored)?"
 echo -e "${YELLOW}(Creates ~/your-workspace-name/)${NC}"
 echo ""
-read -rp "Workspace name [default: tinyclaw-workspace]: " WORKSPACE_INPUT
-WORKSPACE_NAME=${WORKSPACE_INPUT:-tinyclaw-workspace}
+read -rp "Workspace name [default: tinyagi-workspace]: " WORKSPACE_INPUT
+WORKSPACE_NAME=${WORKSPACE_INPUT:-tinyagi-workspace}
 # Clean workspace name
 WORKSPACE_NAME=$(echo "$WORKSPACE_NAME" | tr ' ' '-' | tr -cd 'a-zA-Z0-9_-')
 WORKSPACE_PATH="$HOME/$WORKSPACE_NAME"
@@ -231,11 +231,11 @@ if [[ "$SETUP_AGENTS" =~ ^[yY] ]]; then
                 *) NEW_MODEL="sonnet" ;;
             esac
         else
-            echo "  Model: 1) GPT-5.3 Codex  2) GPT-5.2"
+            echo "  Model: 1) GPT-5 Codex  2) GPT-5.2"
             read -rp "  Choose [1-2, default: 1]: " NEW_MODEL_CHOICE
             case "$NEW_MODEL_CHOICE" in
                 2) NEW_MODEL="gpt-5.2" ;;
-                *) NEW_MODEL="gpt-5.3-codex" ;;
+                *) NEW_MODEL="gpt-5-codex" ;;
             esac
         fi
 
@@ -274,6 +274,9 @@ else
     MODELS_SECTION='"models": { "provider": "openai", "openai": { "model": "'"${MODEL}"'" } }'
 fi
 
+# Ensure settings directory exists before writing settings.json
+mkdir -p "$(dirname "$SETTINGS_FILE")"
+
 cat > "$SETTINGS_FILE" <<EOF
 {
   "workspace": {
@@ -308,60 +311,68 @@ fi
 mkdir -p "$WORKSPACE_PATH"
 echo -e "${GREEN}✓ Created workspace: $WORKSPACE_PATH${NC}"
 
-# Create ~/.tinyclaw with templates
-TINYCLAW_HOME="$HOME/.tinyclaw"
-mkdir -p "$TINYCLAW_HOME"
-mkdir -p "$TINYCLAW_HOME/logs"
+# Create ~/.tinyagi with templates
+TINYAGI_HOME="$HOME/.tinyagi"
+mkdir -p "$TINYAGI_HOME"
+mkdir -p "$TINYAGI_HOME/logs"
 if [ -d "$PROJECT_ROOT/.claude" ]; then
-    cp -r "$PROJECT_ROOT/.claude" "$TINYCLAW_HOME/"
+    cp -r "$PROJECT_ROOT/.claude" "$TINYAGI_HOME/"
 fi
 if [ -f "$PROJECT_ROOT/heartbeat.md" ]; then
-    cp "$PROJECT_ROOT/heartbeat.md" "$TINYCLAW_HOME/"
+    cp "$PROJECT_ROOT/heartbeat.md" "$TINYAGI_HOME/"
 fi
 if [ -f "$PROJECT_ROOT/AGENTS.md" ]; then
-    cp "$PROJECT_ROOT/AGENTS.md" "$TINYCLAW_HOME/"
+    cp "$PROJECT_ROOT/AGENTS.md" "$TINYAGI_HOME/"
 fi
-echo -e "${GREEN}✓ Created ~/.tinyclaw with templates${NC}"
+echo -e "${GREEN}✓ Created ~/.tinyagi with templates${NC}"
+
+# Maintain legacy compatibility alias ~/.tinyclaw -> ~/.tinyagi
+if [ -d "$HOME/.tinyclaw" ] && [ ! -L "$HOME/.tinyclaw" ]; then
+    rm -rf "$HOME/.tinyclaw" 2>/dev/null || true
+fi
+if [ ! -e "$HOME/.tinyclaw" ]; then
+    ln -s "$TINYAGI_HOME" "$HOME/.tinyclaw" 2>/dev/null || true
+fi
 
 # Create default agent directory with config files
 mkdir -p "$DEFAULT_AGENT_DIR"
-if [ -d "$TINYCLAW_HOME/.claude" ]; then
-    cp -r "$TINYCLAW_HOME/.claude" "$DEFAULT_AGENT_DIR/"
+if [ -d "$TINYAGI_HOME/.claude" ]; then
+    cp -r "$TINYAGI_HOME/.claude" "$DEFAULT_AGENT_DIR/"
 fi
-if [ -f "$TINYCLAW_HOME/heartbeat.md" ]; then
-    cp "$TINYCLAW_HOME/heartbeat.md" "$DEFAULT_AGENT_DIR/"
+if [ -f "$TINYAGI_HOME/heartbeat.md" ]; then
+    cp "$TINYAGI_HOME/heartbeat.md" "$DEFAULT_AGENT_DIR/"
 fi
-if [ -f "$TINYCLAW_HOME/AGENTS.md" ]; then
-    cp "$TINYCLAW_HOME/AGENTS.md" "$DEFAULT_AGENT_DIR/"
+if [ -f "$TINYAGI_HOME/AGENTS.md" ]; then
+    cp "$TINYAGI_HOME/AGENTS.md" "$DEFAULT_AGENT_DIR/"
 fi
 echo -e "${GREEN}✓ Created default agent directory: $DEFAULT_AGENT_DIR${NC}"
 
-# Create ~/.tinyclaw/files directory for file exchange
-mkdir -p "$TINYCLAW_HOME/files"
-echo -e "${GREEN}✓ Created files directory: $TINYCLAW_HOME/files${NC}"
+# Create ~/.tinyagi/files directory for file exchange
+mkdir -p "$TINYAGI_HOME/files"
+echo -e "${GREEN}✓ Created files directory: $TINYAGI_HOME/files${NC}"
 
 # Create directories for additional agents
 for agent_id in "${ADDITIONAL_AGENTS[@]}"; do
     AGENT_DIR="$WORKSPACE_PATH/$agent_id"
     mkdir -p "$AGENT_DIR"
-    if [ -d "$TINYCLAW_HOME/.claude" ]; then
-        cp -r "$TINYCLAW_HOME/.claude" "$AGENT_DIR/"
+    if [ -d "$TINYAGI_HOME/.claude" ]; then
+        cp -r "$TINYAGI_HOME/.claude" "$AGENT_DIR/"
     fi
-    if [ -f "$TINYCLAW_HOME/heartbeat.md" ]; then
-        cp "$TINYCLAW_HOME/heartbeat.md" "$AGENT_DIR/"
+    if [ -f "$TINYAGI_HOME/heartbeat.md" ]; then
+        cp "$TINYAGI_HOME/heartbeat.md" "$AGENT_DIR/"
     fi
-    if [ -f "$TINYCLAW_HOME/AGENTS.md" ]; then
-        cp "$TINYCLAW_HOME/AGENTS.md" "$AGENT_DIR/"
+    if [ -f "$TINYAGI_HOME/AGENTS.md" ]; then
+        cp "$TINYAGI_HOME/AGENTS.md" "$AGENT_DIR/"
     fi
     echo -e "${GREEN}✓ Created agent directory: $AGENT_DIR${NC}"
 done
 
-echo -e "${GREEN}✓ Configuration saved to ~/.tinyclaw/settings.json${NC}"
+echo -e "${GREEN}✓ Configuration saved to ~/.tinyagi/settings.json${NC}"
 echo ""
 echo "You can manage agents later with:"
-echo -e "  ${GREEN}tinyclaw agent list${NC}    - List agents"
-echo -e "  ${GREEN}tinyclaw agent add${NC}     - Add more agents"
+echo -e "  ${GREEN}tinyagi agent list${NC}    - List agents"
+echo -e "  ${GREEN}tinyagi agent add${NC}     - Add more agents"
 echo ""
-echo "You can now start TinyClaw:"
-echo -e "  ${GREEN}tinyclaw start${NC}"
+echo "You can now start tinyAGI:"
+echo -e "  ${GREEN}tinyagi start${NC}"
 echo ""

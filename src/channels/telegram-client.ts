@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Telegram Client for TinyClaw Simple
+ * Telegram Client for tinyAGI
  * Writes DM messages to queue and reads responses
  * Does NOT call Claude directly - that's handled by queue-processor
  *
@@ -14,18 +14,24 @@ import path from 'path';
 import https from 'https';
 import http from 'http';
 import { ensureSenderPaired } from '../lib/pairing';
+import {
+    FILES_DIR,
+    QUEUE_INCOMING,
+    QUEUE_OUTGOING,
+    SETTINGS_FILE,
+    TINYAGI_HOME,
+} from '../lib/config';
+import { incrementMetric } from '../harness/repository';
+import {
+    cleanupExpiredPendingMessages,
+    clearPendingMessage,
+    readPendingMessage,
+    rememberPendingMessage,
+} from './pending-store';
 
-const SCRIPT_DIR = path.resolve(__dirname, '..', '..');
-const _localTinyclaw = path.join(SCRIPT_DIR, '.tinyclaw');
-const TINYCLAW_HOME = fs.existsSync(path.join(_localTinyclaw, 'settings.json'))
-    ? _localTinyclaw
-    : path.join(require('os').homedir(), '.tinyclaw');
-const QUEUE_INCOMING = path.join(TINYCLAW_HOME, 'queue/incoming');
-const QUEUE_OUTGOING = path.join(TINYCLAW_HOME, 'queue/outgoing');
-const LOG_FILE = path.join(TINYCLAW_HOME, 'logs/telegram.log');
-const SETTINGS_FILE = path.join(TINYCLAW_HOME, 'settings.json');
-const FILES_DIR = path.join(TINYCLAW_HOME, 'files');
-const PAIRING_FILE = path.join(TINYCLAW_HOME, 'pairing.json');
+const LOG_FILE = path.join(TINYAGI_HOME, 'logs/telegram.log');
+const PAIRING_FILE = path.join(TINYAGI_HOME, 'pairing.json');
+const CLI_NAME = 'tinyagi';
 
 // Ensure directories exist
 [QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE), FILES_DIR].forEach(dir => {
@@ -112,7 +118,7 @@ function getTeamListText(): string {
         const settings = JSON.parse(settingsData);
         const teams = settings.teams;
         if (!teams || Object.keys(teams).length === 0) {
-            return 'No teams configured.\n\nCreate a team with: tinyclaw team add';
+            return `No teams configured.\n\nCreate a team with: ${CLI_NAME} team add`;
         }
         let text = 'Available Teams:\n';
         for (const [id, team] of Object.entries(teams) as [string, any][]) {
@@ -134,7 +140,7 @@ function getAgentListText(): string {
         const settings = JSON.parse(settingsData);
         const agents = settings.agents;
         if (!agents || Object.keys(agents).length === 0) {
-            return 'No agents configured. Using default single-agent mode.\n\nConfigure agents in .tinyclaw/settings.json or run: tinyclaw agent add';
+            return `No agents configured. Using default single-agent mode.\n\nConfigure agents in ~/.tinyagi/settings.json or run: ${CLI_NAME} agent add`;
         }
         let text = 'Available Agents:\n';
         for (const [id, agent] of Object.entries(agents) as [string, any][]) {
@@ -250,8 +256,8 @@ function pairingMessage(code: string): string {
     return [
         'This sender is not paired yet.',
         `Your pairing code: ${code}`,
-        'Ask the TinyClaw owner to approve you with:',
-        `tinyclaw pairing approve ${code}`,
+        'Ask the tinyAGI owner to approve you with:',
+        `${CLI_NAME} pairing approve ${code}`,
     ].join('\n');
 }
 
@@ -393,7 +399,7 @@ bot.on('message', async (msg: TelegramBot.Message) => {
                 const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
                 const settings = JSON.parse(settingsData);
                 const agents = settings.agents || {};
-                const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyclaw-workspace');
+                const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyagi-workspace');
                 const resetResults: string[] = [];
                 for (const agentId of agentArgs) {
                     if (!agents[agentId]) {
@@ -448,14 +454,24 @@ bot.on('message', async (msg: TelegramBot.Message) => {
             messageId: msg.message_id,
             timestamp: Date.now(),
         });
+        rememberPendingMessage({
+            messageId: queueMessageId,
+            channel: 'telegram',
+            sender,
+            senderId,
+            chatRef: String(msg.chat.id),
+            replyRef: String(msg.message_id),
+        });
 
         // Clean up old pending messages (older than 10 minutes)
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         for (const [id, data] of pendingMessages.entries()) {
             if (data.timestamp < tenMinutesAgo) {
                 pendingMessages.delete(id);
+                clearPendingMessage(id);
             }
         }
+        cleanupExpiredPendingMessages('telegram');
 
     } catch (error) {
         log('ERROR', `Message handling error: ${(error as Error).message}`);
@@ -483,6 +499,7 @@ async function checkOutgoingQueue(): Promise<void> {
 
                 // Find pending message
                 const pending = pendingMessages.get(messageId);
+                const durablePending = pending ? null : readPendingMessage('telegram', messageId);
                 if (pending) {
                     // Send any attached files first
                     if (responseData.files && responseData.files.length > 0) {
@@ -525,6 +542,51 @@ async function checkOutgoingQueue(): Promise<void> {
 
                     // Clean up
                     pendingMessages.delete(messageId);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'telegram', mode: 'reply' });
+                    fs.unlinkSync(filePath);
+                } else if (durablePending) {
+                    const chatId = Number(durablePending.chatRef || durablePending.senderId);
+
+                    if (responseData.files && responseData.files.length > 0) {
+                        for (const file of responseData.files) {
+                            try {
+                                if (!fs.existsSync(file)) continue;
+                                const ext = path.extname(file).toLowerCase();
+                                if (['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext)) {
+                                    await bot.sendPhoto(chatId, file);
+                                } else if (['.mp3', '.ogg', '.wav', '.m4a'].includes(ext)) {
+                                    await bot.sendAudio(chatId, file);
+                                } else if (['.mp4', '.avi', '.mov', '.webm'].includes(ext)) {
+                                    await bot.sendVideo(chatId, file);
+                                } else {
+                                    await bot.sendDocument(chatId, file);
+                                }
+                                log('INFO', `Sent file to Telegram: ${path.basename(file)}`);
+                            } catch (fileErr) {
+                                log('ERROR', `Failed to send file ${file}: ${(fileErr as Error).message}`);
+                            }
+                        }
+                    }
+
+                    if (responseText) {
+                        const chunks = splitMessage(responseText);
+                        const replyId = Number(durablePending.replyRef || '0');
+                        if (chunks.length > 0) {
+                            if (Number.isFinite(replyId) && replyId > 0) {
+                                await bot.sendMessage(chatId, chunks[0]!, { reply_to_message_id: replyId });
+                            } else {
+                                await bot.sendMessage(chatId, chunks[0]!);
+                            }
+                        }
+                        for (let i = 1; i < chunks.length; i++) {
+                            await bot.sendMessage(chatId, chunks[i]!);
+                        }
+                    }
+
+                    log('INFO', `Sent durable response to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'telegram', mode: 'durable' });
                     fs.unlinkSync(filePath);
                 } else if (responseData.senderId) {
                     // Proactive/agent-initiated message — send directly to user
@@ -561,9 +623,11 @@ async function checkOutgoingQueue(): Promise<void> {
                     }
 
                     log('INFO', `Sent proactive message to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'telegram', mode: 'proactive' });
                     fs.unlinkSync(filePath);
                 } else {
                     log('WARN', `No pending message for ${messageId} and no senderId, cleaning up`);
+                    incrementMetric('channel_response_dropped_count', 1, { channel: 'telegram', reason: 'no_pending_no_sender' });
                     fs.unlinkSync(filePath);
                 }
             } catch (error) {

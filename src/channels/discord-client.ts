@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Discord Client for TinyClaw Simple
+ * Discord Client for tinyAGI
  * Writes DM messages to queue and reads responses
  * Does NOT call Claude directly - that's handled by queue-processor
  */
@@ -12,18 +12,24 @@ import path from 'path';
 import https from 'https';
 import http from 'http';
 import { ensureSenderPaired } from '../lib/pairing';
+import {
+    FILES_DIR,
+    QUEUE_INCOMING,
+    QUEUE_OUTGOING,
+    SETTINGS_FILE,
+    TINYAGI_HOME,
+} from '../lib/config';
+import { incrementMetric } from '../harness/repository';
+import {
+    cleanupExpiredPendingMessages,
+    clearPendingMessage,
+    readPendingMessage,
+    rememberPendingMessage,
+} from './pending-store';
 
-const SCRIPT_DIR = path.resolve(__dirname, '..', '..');
-const _localTinyclaw = path.join(SCRIPT_DIR, '.tinyclaw');
-const TINYCLAW_HOME = fs.existsSync(path.join(_localTinyclaw, 'settings.json'))
-    ? _localTinyclaw
-    : path.join(require('os').homedir(), '.tinyclaw');
-const QUEUE_INCOMING = path.join(TINYCLAW_HOME, 'queue/incoming');
-const QUEUE_OUTGOING = path.join(TINYCLAW_HOME, 'queue/outgoing');
-const LOG_FILE = path.join(TINYCLAW_HOME, 'logs/discord.log');
-const SETTINGS_FILE = path.join(TINYCLAW_HOME, 'settings.json');
-const FILES_DIR = path.join(TINYCLAW_HOME, 'files');
-const PAIRING_FILE = path.join(TINYCLAW_HOME, 'pairing.json');
+const LOG_FILE = path.join(TINYAGI_HOME, 'logs/discord.log');
+const PAIRING_FILE = path.join(TINYAGI_HOME, 'pairing.json');
+const CLI_NAME = 'tinyagi';
 
 // Ensure directories exist
 [QUEUE_INCOMING, QUEUE_OUTGOING, path.dirname(LOG_FILE), FILES_DIR].forEach(dir => {
@@ -130,7 +136,7 @@ function getTeamListText(): string {
         const settings = JSON.parse(settingsData);
         const teams = settings.teams;
         if (!teams || Object.keys(teams).length === 0) {
-            return 'No teams configured.\n\nCreate a team with `tinyclaw team add`.';
+            return `No teams configured.\n\nCreate a team with \`${CLI_NAME} team add\`.`;
         }
         let text = '**Available Teams:**\n';
         for (const [id, team] of Object.entries(teams) as [string, any][]) {
@@ -152,7 +158,7 @@ function getAgentListText(): string {
         const settings = JSON.parse(settingsData);
         const agents = settings.agents;
         if (!agents || Object.keys(agents).length === 0) {
-            return 'No agents configured. Using default single-agent mode.\n\nConfigure agents in `.tinyclaw/settings.json` or run `tinyclaw agent add`.';
+            return `No agents configured. Using default single-agent mode.\n\nConfigure agents in \`~/.tinyagi/settings.json\` or run \`${CLI_NAME} agent add\`.`;
         }
         let text = '**Available Agents:**\n';
         for (const [id, agent] of Object.entries(agents) as [string, any][]) {
@@ -208,8 +214,8 @@ function pairingMessage(code: string): string {
     return [
         'This sender is not paired yet.',
         `Your pairing code: ${code}`,
-        'Ask the TinyClaw owner to approve you with:',
-        `tinyclaw pairing approve ${code}`,
+        'Ask the tinyAGI owner to approve you with:',
+        `${CLI_NAME} pairing approve ${code}`,
     ].join('\n');
 }
 
@@ -320,7 +326,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
                 const settingsData = fs.readFileSync(SETTINGS_FILE, 'utf8');
                 const settings = JSON.parse(settingsData);
                 const agents = settings.agents || {};
-                const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyclaw-workspace');
+                const workspacePath = settings?.workspace?.path || path.join(require('os').homedir(), 'tinyagi-workspace');
                 const resetResults: string[] = [];
                 for (const agentId of agentArgs) {
                     if (!agents[agentId]) {
@@ -371,14 +377,24 @@ client.on(Events.MessageCreate, async (message: Message) => {
             channel: message.channel as DMChannel,
             timestamp: Date.now(),
         });
+        rememberPendingMessage({
+            messageId,
+            channel: 'discord',
+            sender,
+            senderId: message.author.id,
+            chatRef: message.author.id,
+            replyRef: message.id,
+        });
 
         // Clean up old pending messages (older than 10 minutes)
         const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
         for (const [id, data] of pendingMessages.entries()) {
             if (data.timestamp < tenMinutesAgo) {
                 pendingMessages.delete(id);
+                clearPendingMessage(id);
             }
         }
+        cleanupExpiredPendingMessages('discord');
 
     } catch (error) {
         log('ERROR', `Message handling error: ${(error as Error).message}`);
@@ -406,6 +422,7 @@ async function checkOutgoingQueue(): Promise<void> {
 
                 // Find pending message
                 const pending = pendingMessages.get(messageId);
+                const durablePending = pending ? null : readPendingMessage('discord', messageId);
                 if (pending) {
                     // Send any attached files
                     if (responseData.files && responseData.files.length > 0) {
@@ -441,6 +458,39 @@ async function checkOutgoingQueue(): Promise<void> {
 
                     // Clean up
                     pendingMessages.delete(messageId);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'discord', mode: 'reply' });
+                    fs.unlinkSync(filePath);
+                } else if (durablePending) {
+                    const user = await client.users.fetch(durablePending.chatRef || durablePending.senderId);
+                    const dmChannel = await user.createDM();
+
+                    if (responseData.files && responseData.files.length > 0) {
+                        const attachments: AttachmentBuilder[] = [];
+                        for (const file of responseData.files) {
+                            try {
+                                if (!fs.existsSync(file)) continue;
+                                attachments.push(new AttachmentBuilder(file));
+                            } catch (fileErr) {
+                                log('ERROR', `Failed to prepare file ${file}: ${(fileErr as Error).message}`);
+                            }
+                        }
+                        if (attachments.length > 0) {
+                            await dmChannel.send({ files: attachments });
+                            log('INFO', `Sent ${attachments.length} file(s) to Discord`);
+                        }
+                    }
+
+                    if (responseText) {
+                        const chunks = splitMessage(responseText);
+                        for (const chunk of chunks) {
+                            await dmChannel.send(chunk);
+                        }
+                    }
+
+                    log('INFO', `Sent durable response to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                    clearPendingMessage(messageId);
+                    incrementMetric('channel_response_delivered_count', 1, { channel: 'discord', mode: 'durable' });
                     fs.unlinkSync(filePath);
                 } else if (responseData.senderId) {
                     // Proactive/agent-initiated message — DM the user directly
@@ -474,12 +524,14 @@ async function checkOutgoingQueue(): Promise<void> {
                         }
 
                         log('INFO', `Sent proactive message to ${sender} (${responseText.length} chars${responseData.files ? `, ${responseData.files.length} file(s)` : ''})`);
+                        incrementMetric('channel_response_delivered_count', 1, { channel: 'discord', mode: 'proactive' });
                     } catch (dmErr) {
                         log('ERROR', `Failed to send proactive DM to ${responseData.senderId}: ${(dmErr as Error).message}`);
                     }
                     fs.unlinkSync(filePath);
                 } else {
                     log('WARN', `No pending message for ${messageId} and no senderId, cleaning up`);
+                    incrementMetric('channel_response_dropped_count', 1, { channel: 'discord', reason: 'no_pending_no_sender' });
                     fs.unlinkSync(filePath);
                 }
             } catch (error) {

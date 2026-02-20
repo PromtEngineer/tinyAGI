@@ -3,15 +3,21 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-if [ -f "$PROJECT_ROOT/.tinyclaw/settings.json" ]; then
-    TINYCLAW_HOME="$PROJECT_ROOT/.tinyclaw"
+if [ -f "$PROJECT_ROOT/.tinyagi/settings.json" ]; then
+    TINYAGI_HOME="$PROJECT_ROOT/.tinyagi"
+elif [ -f "$PROJECT_ROOT/.tinyclaw/settings.json" ]; then
+    TINYAGI_HOME="$PROJECT_ROOT/.tinyclaw"
 else
-    TINYCLAW_HOME="$HOME/.tinyclaw"
+    TINYAGI_HOME="$HOME/.tinyagi"
 fi
-LOG_FILE="$TINYCLAW_HOME/logs/heartbeat.log"
-QUEUE_INCOMING="$TINYCLAW_HOME/queue/incoming"
-QUEUE_OUTGOING="$TINYCLAW_HOME/queue/outgoing"
-SETTINGS_FILE="$PROJECT_ROOT/.tinyclaw/settings.json"
+LOG_FILE="$TINYAGI_HOME/logs/heartbeat.log"
+QUEUE_INCOMING="$TINYAGI_HOME/queue/incoming"
+QUEUE_OUTGOING="$TINYAGI_HOME/queue/outgoing"
+if [ -f "$PROJECT_ROOT/.tinyagi/settings.json" ]; then
+    SETTINGS_FILE="$PROJECT_ROOT/.tinyagi/settings.json"
+else
+    SETTINGS_FILE="$TINYAGI_HOME/settings.json"
+fi
 
 # Read interval from settings.json, default to 3600
 if [ -f "$SETTINGS_FILE" ]; then
@@ -43,7 +49,7 @@ while true; do
     # Get workspace path
     WORKSPACE_PATH=$(jq -r '.workspace.path // empty' "$SETTINGS_FILE" 2>/dev/null)
     if [ -z "$WORKSPACE_PATH" ]; then
-        WORKSPACE_PATH="$HOME/tinyclaw-workspace"
+        WORKSPACE_PATH="$HOME/tinyagi-workspace"
     fi
 
     # Get all agent IDs
@@ -79,13 +85,16 @@ while true; do
         # Generate unique message ID
         MESSAGE_ID="heartbeat_${AGENT_ID}_$(date +%s)_$$"
 
+        # Escape prompt for safe JSON embedding (newlines, quotes, backslashes, tabs)
+        PROMPT_ESCAPED=$(printf '%s' "$PROMPT" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+
         # Write to queue with @agent_id routing prefix
         cat > "$QUEUE_INCOMING/${MESSAGE_ID}.json" << EOF
 {
   "channel": "heartbeat",
   "sender": "System",
   "senderId": "heartbeat_${AGENT_ID}",
-  "message": "@${AGENT_ID} ${PROMPT}",
+  "message": "@${AGENT_ID} ${PROMPT_ESCAPED}",
   "timestamp": $(date +%s)000,
   "messageId": "$MESSAGE_ID"
 }

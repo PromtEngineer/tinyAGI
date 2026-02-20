@@ -1,53 +1,55 @@
 #!/usr/bin/env bash
-# TinyClaw CLI Uninstallation Script
+# tinyAGI CLI Uninstallation Script
 
 set -e
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo -e "${BLUE}TinyClaw CLI Uninstaller${NC}"
-echo "========================"
+echo -e "${BLUE}tinyAGI CLI Uninstaller${NC}"
+echo "======================="
 echo ""
 
-# Check possible installation locations
 FOUND=false
 
 for INSTALL_DIR in "/usr/local/bin" "$HOME/.local/bin"; do
-    if [ -L "$INSTALL_DIR/tinyclaw" ]; then
-        FOUND=true
-        TARGET="$(readlink "$INSTALL_DIR/tinyclaw")"
+    for CMD in tinyagi tinyclaw; do
+        if [ -L "$INSTALL_DIR/$CMD" ]; then
+            FOUND=true
+            TARGET="$(readlink "$INSTALL_DIR/$CMD")"
 
-        echo -e "Found TinyClaw at: ${YELLOW}$INSTALL_DIR/tinyclaw${NC}"
-        echo -e "Points to: ${YELLOW}$TARGET${NC}"
-        echo ""
+            echo -e "Found ${CMD} at: ${YELLOW}$INSTALL_DIR/$CMD${NC}"
+            echo -e "Points to: ${YELLOW}$TARGET${NC}"
+            echo ""
 
-        read -p "Remove this installation? (y/N) " -n 1 -r
-        echo ""
+            read -p "Remove this symlink? (y/N) " -n 1 -r
+            echo ""
 
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm "$INSTALL_DIR/tinyclaw"
-            echo -e "${GREEN}✓ Removed $INSTALL_DIR/tinyclaw${NC}"
-        else
-            echo "Skipped."
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                rm "$INSTALL_DIR/$CMD"
+                echo -e "${GREEN}✓ Removed $INSTALL_DIR/$CMD${NC}"
+            else
+                echo "Skipped."
+            fi
+            echo ""
         fi
-        echo ""
-    fi
+    done
 done
 
 if [ "$FOUND" = false ]; then
-    echo -e "${YELLOW}No TinyClaw installation found${NC}"
+    echo -e "${YELLOW}No tinyAGI installation found${NC}"
     echo ""
     echo "Checked locations:"
+    echo "  - /usr/local/bin/tinyagi"
     echo "  - /usr/local/bin/tinyclaw"
+    echo "  - ~/.local/bin/tinyagi"
     echo "  - ~/.local/bin/tinyclaw"
 fi
 
 echo -e "${GREEN}Uninstallation complete${NC}"
 echo ""
-echo "Note: This only removes the CLI symlink."
-echo "The TinyClaw installation directory is preserved."
+echo "Note: This only removes CLI symlinks."
+echo "The project directory and ~/.tinyagi state are preserved."
 echo ""

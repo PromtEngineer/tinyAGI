@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Common utilities and configuration for TinyClaw
+# Common utilities and configuration for tinyAGI
 # Sourced by main tinyclaw.sh script
 
 # Check bash version (need 4.0+ for associative arrays)
@@ -84,7 +84,7 @@ load_settings() {
     WORKSPACE_PATH=$(jq -r '.workspace.path // empty' "$SETTINGS_FILE" 2>/dev/null)
     if [ -z "$WORKSPACE_PATH" ]; then
         # Fallback for old configs without workspace
-        WORKSPACE_PATH="$HOME/tinyclaw-workspace"
+        WORKSPACE_PATH="$HOME/tinyagi-workspace"
     fi
 
     # Read enabled channels array

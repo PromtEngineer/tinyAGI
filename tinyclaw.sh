@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# TinyClaw - Main daemon using tmux + claude -c -p + messaging channels
+# tinyAGI - Main daemon using tmux + model CLIs + messaging channels
 #
 # To add a new channel:
 #   1. Create src/channels/<channel>-client.ts
@@ -7,20 +7,50 @@
 #   3. Fill in the CHANNEL_* registry arrays in lib/common.sh
 #   4. Run setup wizard to enable it
 
-# Use TINYCLAW_HOME if set (for CLI wrapper), otherwise detect from script location
-if [ -n "$TINYCLAW_HOME" ]; then
+# Prefer modern bash on macOS if current shell is too old.
+if [ -n "${BASH_VERSINFO:-}" ] && [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    if [ -x "/opt/homebrew/bin/bash" ]; then
+        exec "/opt/homebrew/bin/bash" "$0" "$@"
+    elif [ -x "/usr/local/bin/bash" ]; then
+        exec "/usr/local/bin/bash" "$0" "$@"
+    fi
+fi
+
+# Use TINYAGI_HOME if set (for CLI wrapper), otherwise detect from script location
+if [ -n "$TINYAGI_HOME" ]; then
+    SCRIPT_DIR="$TINYAGI_HOME"
+elif [ -n "$TINYCLAW_HOME" ]; then
     SCRIPT_DIR="$TINYCLAW_HOME"
 else
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
-TMUX_SESSION="tinyclaw"
-# Centralize all logs to ~/.tinyclaw/logs
-LOG_DIR="$HOME/.tinyclaw/logs"
-if [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
-    SETTINGS_FILE="$SCRIPT_DIR/.tinyclaw/settings.json"
+CLI_NAME="$(basename "$0")"
+[[ "$CLI_NAME" != "tinyagi" && "$CLI_NAME" != "tinyclaw" ]] && CLI_NAME="tinyagi"
+TMUX_SESSION="tinyagi"
+
+# Resolve state home with tinyAGI primary path and tinyclaw compatibility.
+if [ -d "$SCRIPT_DIR/.tinyagi" ] || [ -f "$SCRIPT_DIR/.tinyagi/settings.json" ]; then
+    STATE_HOME="$SCRIPT_DIR/.tinyagi"
+elif [ -d "$SCRIPT_DIR/.tinyclaw" ] || [ -f "$SCRIPT_DIR/.tinyclaw/settings.json" ]; then
+    STATE_HOME="$SCRIPT_DIR/.tinyclaw"
 else
-    SETTINGS_FILE="$HOME/.tinyclaw/settings.json"
+    STATE_HOME="$HOME/.tinyagi"
+    LEGACY_HOME="$HOME/.tinyclaw"
+    if [ ! -d "$STATE_HOME" ] && [ -d "$LEGACY_HOME" ]; then
+        mkdir -p "$STATE_HOME"
+        cp -a "$LEGACY_HOME"/. "$STATE_HOME"/ 2>/dev/null || true
+        if [ -d "$LEGACY_HOME" ] && [ ! -L "$LEGACY_HOME" ]; then
+            rm -rf "$LEGACY_HOME" 2>/dev/null || true
+        fi
+        if [ ! -e "$LEGACY_HOME" ]; then
+            ln -s "$STATE_HOME" "$LEGACY_HOME" 2>/dev/null || true
+        fi
+    fi
 fi
+
+export TINYAGI_STATE_HOME="$STATE_HOME"
+LOG_DIR="$STATE_HOME/logs"
+SETTINGS_FILE="$STATE_HOME/settings.json"
 
 mkdir -p "$LOG_DIR"
 
@@ -32,6 +62,17 @@ source "$SCRIPT_DIR/lib/agents.sh"
 source "$SCRIPT_DIR/lib/teams.sh"
 source "$SCRIPT_DIR/lib/pairing.sh"
 source "$SCRIPT_DIR/lib/update.sh"
+
+run_harness_cli() {
+    if [ ! -f "$SCRIPT_DIR/dist/harness/cli.js" ] || [ "$SCRIPT_DIR/src/harness/cli.ts" -nt "$SCRIPT_DIR/dist/harness/cli.js" ]; then
+        cd "$SCRIPT_DIR" && npm run build:main >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}Failed to build TypeScript harness CLI.${NC}"
+            exit 1
+        fi
+    fi
+    node "$SCRIPT_DIR/dist/harness/cli.js" "$@"
+}
 
 # --- Main command dispatch ---
 
@@ -129,7 +170,7 @@ case "${1:-}" in
                         jq ".models.provider = \"anthropic\"" "$SETTINGS_FILE" > "$tmp_file" && mv "$tmp_file" "$SETTINGS_FILE"
                         echo -e "${GREEN}✓ Switched to Anthropic provider${NC}"
                         echo ""
-                        echo "Use 'tinyclaw model {sonnet|opus}' to set the model."
+                        echo "Use '${CLI_NAME} model {sonnet|opus}' to set the model."
                     fi
                     ;;
                 openai)
@@ -151,7 +192,7 @@ case "${1:-}" in
                         jq ".models.provider = \"openai\"" "$SETTINGS_FILE" > "$tmp_file" && mv "$tmp_file" "$SETTINGS_FILE"
                         echo -e "${GREEN}✓ Switched to OpenAI/Codex provider${NC}"
                         echo ""
-                        echo "Use 'tinyclaw model {gpt-5.3-codex|gpt-5.2}' to set the model."
+                        echo "Use '${CLI_NAME} model {gpt-5-codex|gpt-5.2}' to set the model."
                         echo "Note: Make sure you have the 'codex' CLI installed and authenticated."
                     fi
                     ;;
@@ -163,7 +204,7 @@ case "${1:-}" in
                     echo "  $0 provider anthropic                          # Switch to Anthropic"
                     echo "  $0 provider openai                             # Switch to OpenAI"
                     echo "  $0 provider anthropic --model sonnet           # Switch to Anthropic with Sonnet"
-                    echo "  $0 provider openai --model gpt-5.3-codex       # Switch to OpenAI with GPT-5.3 Codex"
+                    echo "  $0 provider openai --model gpt-5-codex         # Switch to OpenAI with GPT-5 Codex"
                     echo "  $0 provider openai --model gpt-4o              # Switch to OpenAI with custom model"
                     exit 1
                     ;;
@@ -206,7 +247,7 @@ case "${1:-}" in
                     echo ""
                     echo "Note: This affects the queue processor. Changes take effect on next message."
                     ;;
-                gpt-5.2|gpt-5.3-codex)
+                gpt-5.2|gpt-5-codex|gpt-5.3-codex)
                     if [ ! -f "$SETTINGS_FILE" ]; then
                         echo -e "${RED}No settings file found. Run setup first.${NC}"
                         exit 1
@@ -221,20 +262,21 @@ case "${1:-}" in
                     echo "Note: This affects the queue processor. Changes take effect on next message."
                     ;;
                 *)
-                    echo "Usage: $0 model {sonnet|opus|gpt-5.2|gpt-5.3-codex}"
+                    echo "Usage: $0 model {sonnet|opus|gpt-5-codex|gpt-5.2}"
                     echo ""
                     echo "Anthropic models:"
                     echo "  sonnet            # Claude Sonnet (fast)"
                     echo "  opus              # Claude Opus (smartest)"
                     echo ""
                     echo "OpenAI models:"
-                    echo "  gpt-5.3-codex     # GPT-5.3 Codex"
+                    echo "  gpt-5-codex       # GPT-5 Codex (recommended)"
                     echo "  gpt-5.2           # GPT-5.2"
+                    echo "  gpt-5.3-codex     # GPT-5.3 Codex (compatibility)"
                     echo ""
                     echo "Examples:"
                     echo "  $0 model                # Show current model"
                     echo "  $0 model sonnet         # Switch to Claude Sonnet"
-                    echo "  $0 model gpt-5.3-codex  # Switch to GPT-5.3 Codex"
+                    echo "  $0 model gpt-5-codex    # Switch to GPT-5 Codex"
                     exit 1
                     ;;
             esac
@@ -359,6 +401,11 @@ case "${1:-}" in
     pairing)
         pairing_command "${2:-}" "${3:-}"
         ;;
+    harness|task|memory|browser|permission|tools|skills)
+        cmd="$1"
+        shift
+        run_harness_cli "$cmd" "$@"
+        ;;
     attach)
         tmux attach -t "$TMUX_SESSION"
         ;;
@@ -370,14 +417,14 @@ case "${1:-}" in
         ;;
     *)
         local_names=$(IFS='|'; echo "${ALL_CHANNELS[*]}")
-        echo -e "${BLUE}TinyClaw - Claude Code + Messaging Channels${NC}"
+        echo -e "${BLUE}tinyAGI - Messaging + Harness Runtime${NC}"
         echo ""
-        echo "Usage: $0 {start|stop|restart|status|setup|send|logs|reset <agent_id>|channels|provider|model|agent|team|pairing|update|attach}"
+        echo "Usage: $0 {start|stop|restart|status|setup|send|logs|reset <agent_id>|channels|provider|model|agent|team|pairing|harness|task|memory|browser|permission|tools|skills|update|attach}"
         echo ""
         echo "Commands:"
-        echo "  start                    Start TinyClaw"
+        echo "  start                    Start tinyAGI daemon"
         echo "  stop                     Stop all processes"
-        echo "  restart                  Restart TinyClaw"
+        echo "  restart                  Restart tinyAGI"
         echo "  status                   Show current status"
         echo "  setup                    Run setup wizard (change channels/provider/model/heartbeat)"
         echo "  send <msg>               Send message to AI manually"
@@ -389,13 +436,20 @@ case "${1:-}" in
         echo "  agent {list|add|remove|show|reset}  Manage agents"
         echo "  team {list|add|remove|show|visualize}  Manage teams"
         echo "  pairing {pending|approved|list|approve <code>|unpair <channel> <sender_id>}  Manage sender approvals"
-        echo "  update                   Update TinyClaw to latest version"
+        echo "  harness status|enable|disable|autonomy <mode>"
+        echo "  task list|show <run_id>"
+        echo "  memory show|forget|summarize"
+        echo "  browser sessions|attach|approve|deny|approvals"
+        echo "  permission list|grant|revoke"
+        echo "  tools list|register|approve|block"
+        echo "  skills list|show|draft|activate|disable|rollback"
+        echo "  update                   Update tinyAGI to latest version"
         echo "  attach                   Attach to tmux session"
         echo ""
         echo "Examples:"
         echo "  $0 start"
         echo "  $0 status"
-        echo "  $0 provider openai --model gpt-5.3-codex"
+        echo "  $0 provider openai --model gpt-5-codex"
         echo "  $0 model opus"
         echo "  $0 reset coder"
         echo "  $0 reset coder researcher"
